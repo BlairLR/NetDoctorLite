@@ -1,0 +1,13 @@
+.venv/
+.build-venv/
+.uv-cache/
+.pip-cache/
+.tmp/
+build/
+dist/
+__pycache__/
+*.spec
+.python/
+.release-venv/
+.pyi-cache/
+debug-dist/

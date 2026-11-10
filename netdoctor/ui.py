@@ -1,0 +1,330 @@
+from pathlib import Path
+
+from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
+from PySide6.QtGui import QFont
+from PySide6.QtWidgets import (
+    QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame,
+    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox,
+    QProgressBar, QPushButton, QScrollArea, QSpinBox, QTableWidget,
+    QTableWidgetItem, QVBoxLayout, QWidget, QAbstractItemView,
+)
+
+from .model import Proxy, custom_url, hostname
+from .network import diagnose
+from .report import comparison, describe, port_rows, report, route_rows, status, summary
+
+STYLE = """
+QMainWindow, QScrollArea, QWidget#page {background:#f2f5fa;}
+QLabel {color:#172641;}
+QLabel#title {font-size:29px;font-weight:700;}
+QLabel#muted {color:#475b75;}
+QLabel#section {font-size:17px;font-weight:700;color:#132849;}
+QLabel#conclusion {background:#e9f2ff;color:#15365f;padding:12px;border-radius:7px;}
+QFrame#card {background:white;border:1px solid #dce5f1;border-radius:10px;}
+QLineEdit,QComboBox,QSpinBox {background:white;color:#172641;border:1px solid #aebdd1;
+ border-radius:5px;padding:6px;selection-background-color:#1263c7;}
+QPushButton {background:white;color:#173458;border:1px solid #aebdd1;border-radius:6px;padding:8px 14px;}
+QPushButton:hover {background:#eaf3ff;}
+QPushButton#start {background:#155cc4;color:white;border:none;font-weight:700;padding:11px 26px;}
+QPushButton#start:hover {background:#114b9f;}
+QPushButton:disabled,QPushButton#start:disabled {background:#e4eaf2;color:#536680;}
+QProgressBar {background:#dfe8f4;border:none;border-radius:4px;color:#172641;text-align:center;}
+QProgressBar::chunk {background:#74aeff;border-radius:4px;}
+QTableWidget {background:white;alternate-background-color:#f3f7fd;color:#172641;border:0;}
+QHeaderView::section {background:#eaf0f8;color:#20395b;border:0;padding:6px;}
+"""
+
+
+class Worker(QObject):
+    progress = Signal(int, str)
+    done = Signal(object)
+    failed = Signal()
+
+    def __init__(self, url, proxy):
+        super().__init__()
+        self.url = url
+        self.proxy = proxy
+
+    @Slot()
+    def run(self):
+        try:
+            self.done.emit(diagnose(self.url, self.proxy, self.progress.emit))
+        except Exception:
+            self.failed.emit()
+        finally:
+            self.url = self.proxy = None
+
+
+def label(text, name="", wrap=False):
+    item = QLabel(text)
+    item.setObjectName(name)
+    item.setWordWrap(wrap)
+    return item
+
+
+def table(headers):
+    item = QTableWidget(0, len(headers))
+    item.setHorizontalHeaderLabels(headers)
+    item.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+    item.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+    item.setAlternatingRowColors(True)
+    item.setShowGrid(False)
+    item.verticalHeader().hide()
+    item.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+    item.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+    item.horizontalHeader().setStretchLastSection(True)
+    item.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    item.setFixedHeight(34)
+    return item
+
+
+def fill(widget, rows):
+    rows = list(rows)
+    widget.setRowCount(len(rows))
+    for i, row in enumerate(rows):
+        for j, value in enumerate(row):
+            item = QTableWidgetItem(value)
+            item.setToolTip(value)
+            widget.setItem(i, j, item)
+    widget.resizeRowsToContents()
+    widget.setFixedHeight(widget.horizontalHeader().sizeHint().height() +
+                          sum(widget.rowHeight(i) for i in range(len(rows))))
+
+
+class Window(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("NetDoctor Lite · 网络诊断")
+        self.resize(1000, 860)
+        self.setMinimumSize(760, 550)
+        self._thread = None
+        self._worker = None
+        self._proxy = None
+        self._report = ""
+        shell = QWidget()
+        shell.setObjectName("page")
+        outer = QVBoxLayout(shell)
+        outer.setContentsMargins(20, 14, 20, 12)
+        outer.setSpacing(10)
+        outer.addWidget(label("NetDoctor Lite", "title"))
+        outer.addWidget(label("网络诊断  /  网站直连、代理监听与外网通路", "muted"))
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        page = QWidget()
+        page.setObjectName("page")
+        self.body = QVBoxLayout(page)
+        self.body.setContentsMargins(0, 0, 8, 0)
+        self.body.setSpacing(10)
+        scroll.setWidget(page)
+        outer.addWidget(scroll, 1)
+
+        settings = self.card("检测设置")
+        form = QFormLayout()
+        self.url = QLineEdit()
+        self.url.setPlaceholderText("可选，例如 https://example.com")
+        self.url.setMaxLength(2048)
+        self.url.setEchoMode(QLineEdit.EchoMode.PasswordEchoOnEdit)
+        form.addRow("自定义网站", self.url)
+        self.enabled = QCheckBox("测试指定代理")
+        form.addRow("", self.enabled)
+        self.proxy_fields = QWidget()
+        row = QHBoxLayout(self.proxy_fields)
+        row.setContentsMargins(0, 0, 0, 0)
+        self.proto = QComboBox()
+        self.proto.addItems(["HTTP", "SOCKS5"])
+        self.host = QLineEdit("127.0.0.1")
+        self.host.setPlaceholderText("主机或 IP")
+        self.host.setEchoMode(QLineEdit.EchoMode.PasswordEchoOnEdit)
+        self.host.setMaxLength(255)
+        self.port = QSpinBox()
+        self.port.setRange(1, 65535)
+        self.port.setValue(7890)
+        self.username = QLineEdit()
+        self.username.setPlaceholderText("用户名（选填）")
+        self.password = QLineEdit()
+        self.password.setPlaceholderText("密码（选填）")
+        for field in (self.username, self.password):
+            field.setEchoMode(QLineEdit.EchoMode.Password)
+            field.setMaxLength(255)
+        for widget in (self.proto, self.host, self.port, self.username, self.password):
+            row.addWidget(widget)
+        self.proxy_fields.hide()
+        self.enabled.toggled.connect(self.proxy_fields.setVisible)
+        form.addRow("协议 / 主机 / 端口", self.proxy_fields)
+        settings.addLayout(form)
+        settings.addWidget(label("直连忽略系统与环境代理；出口通过 Cloudflare 查询，必要时改用 api.ipify.org。"
+                                 "代理凭据仅在本次测试中使用。", "muted", True))
+        result = self.card("诊断结论")
+        self.conclusion = label("点击「开始检测」查看诊断结果。", "conclusion", True)
+        result.addWidget(self.conclusion)
+        section = self.card("网站连接 · 直连")
+        self.sites = table(("目标", "DNS", "TCP 443", "HTTPS", "HTTP", "耗时", "说明"))
+        section.addWidget(self.sites)
+        section.addWidget(label("HTTPS 成功表示收到经 TLS 验证的响应；HTTP 4xx / 5xx 仍可能无法使用网站。", "muted", True))
+        section = self.card("本机代理端口及设置")
+        self.ports = table(("端口", "TCP", "监听地址", "PID", "进程"))
+        section.addWidget(self.ports)
+        self.config = label("等待检测", "muted", True)
+        section.addWidget(self.config)
+        section = self.card("外网通路 · Cloudflare")
+        self.routes = table(("检测项", "结果"))
+        section.addWidget(self.routes)
+        self.compare = label("等待检测", "muted", True)
+        section.addWidget(self.compare)
+        self.body.addStretch()
+
+        actions = QHBoxLayout()
+        self.start = QPushButton("开始检测")
+        self.start.setObjectName("start")
+        self.start.clicked.connect(self.begin)
+        self.copy = QPushButton("复制诊断结果")
+        self.copy.clicked.connect(self.copy_result)
+        self.export = QPushButton("导出 TXT")
+        self.export.clicked.connect(self.save_result)
+        self.copy.setEnabled(False)
+        self.export.setEnabled(False)
+        self.activity = label("就绪", "muted")
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setFixedWidth(112)
+        for widget in (self.start, self.progress, self.activity):
+            actions.addWidget(widget)
+        actions.addStretch()
+        actions.addWidget(self.copy)
+        actions.addWidget(self.export)
+        outer.addLayout(actions)
+        self.setCentralWidget(shell)
+
+    def card(self, title):
+        frame = QFrame()
+        frame.setObjectName("card")
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(14, 10, 14, 12)
+        layout.addWidget(label(title, "section"))
+        self.body.addWidget(frame)
+        return layout
+
+    @Slot()
+    def begin(self):
+        if self._thread is not None:
+            return
+        try:
+            raw = self.url.text().strip()
+            url = custom_url(raw) if raw else None
+        except ValueError:
+            QMessageBox.warning(self, "网址无效", "请输入有效的 HTTPS 网址，不要在网址中填写用户名或密码。")
+            return
+        proxy = None
+        if self.enabled.isChecked():
+            try:
+                host = hostname(self.host.text().strip().removeprefix("[").removesuffix("]"))
+                user, password = self.username.text(), self.password.text()
+                proto = self.proto.currentText()
+                if (password and not user) or any(ord(c) < 32 or ord(c) == 127 for c in user + password):
+                    raise ValueError
+                if proto == "HTTP":
+                    if ":" in user:
+                        raise ValueError
+                    (user + password).encode("latin-1")
+                elif user and (not password or any(len(v.encode("utf-8")) > 255 for v in (user, password))):
+                    raise ValueError
+                proxy = Proxy(proto, host, self.port.value(), user, password)
+            except ValueError:
+                QMessageBox.warning(self, "代理设置无效", "请检查主机、端口和认证信息。SOCKS5 认证须填写用户名和密码。")
+                return
+        self.username.clear()
+        self.password.clear()
+        self._proxy = proxy
+        self._report = ""
+        for widget in (self.start, self.copy, self.export):
+            widget.setEnabled(False)
+        for widget in (self.sites, self.ports, self.routes):
+            fill(widget, [])
+        self.config.setText("正在检测…")
+        self.compare.setText("正在检测…")
+        self.conclusion.setText("正在检测，请稍候。")
+        self.set_progress(0, "正在启动检测")
+        self._thread = QThread(self)
+        self._worker = Worker(url, proxy)
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.progress.connect(self.set_progress)
+        self._worker.done.connect(self.show_result)
+        self._worker.failed.connect(self.show_failure)
+        self._worker.done.connect(self._thread.quit)
+        self._worker.failed.connect(self._thread.quit)
+        self._thread.finished.connect(self._worker.deleteLater)
+        self._thread.finished.connect(self.worker_finished)
+        self._thread.start()
+
+    @Slot(int, str)
+    def set_progress(self, value, text):
+        self.progress.setValue(value)
+        self.activity.setText(text)
+
+    @Slot(object)
+    def show_result(self, result):
+        ports, local, config, sites, *_ = result
+        self.conclusion.setText(summary(result, self._proxy))
+        fill(self.sites, (
+            (s.name, status(s.dns), status(s.tcp) if s.dns.ok else "未检测",
+             status(s.https), str(s.https.code or "—"),
+             f"{s.https.ms} 毫秒" if s.https.ms is not None else "—",
+             "；".join([s.dns.detail] if not s.dns.ok else
+                        [s.tcp.detail] if not s.tcp.ok else []) +
+             ("；" if not (s.dns.ok and s.tcp.ok) else "") + s.https.detail)
+            for s in sites
+        ))
+        fill(self.ports, port_rows(ports, local))
+        self.config.setText("\n".join(config))
+        fill(self.routes, ((name, describe(check, show_ip=True)) for name, check in route_rows(result)))
+        self.compare.setText(comparison(result))
+        self._report = report(result, self._proxy)
+        self._proxy = None
+        self.copy.setEnabled(True)
+        self.export.setEnabled(True)
+
+    @Slot()
+    def show_failure(self):
+        self._proxy = None
+        self.conclusion.setText("检测未能完成，请重新开始。")
+        self.config.setText("未取得结果")
+        self.compare.setText("未取得结果")
+        self.set_progress(0, "检测失败")
+
+    @Slot()
+    def worker_finished(self):
+        self._thread.deleteLater()
+        self._thread = self._worker = None
+        self.start.setEnabled(True)
+
+    @Slot()
+    def copy_result(self):
+        QApplication.clipboard().setText(self._report)
+        self.activity.setText("已复制脱敏报告")
+
+    @Slot()
+    def save_result(self):
+        path, _ = QFileDialog.getSaveFileName(self, "导出诊断报告", "NetDoctorLite-报告.txt", "文本文件 (*.txt)")
+        if path:
+            try:
+                Path(path).write_text(self._report, encoding="utf-8-sig")
+                self.activity.setText("已导出脱敏报告")
+            except OSError:
+                QMessageBox.warning(self, "导出失败", "无法写入所选位置，请检查权限或选择其他位置。")
+
+    def closeEvent(self, event):
+        if self._thread is not None:
+            event.ignore()
+            self.activity.setText("请等待本轮检测结束")
+        else:
+            super().closeEvent(event)
+
+
+def make_app():
+    app = QApplication([])
+    app.setApplicationName("NetDoctor Lite")
+    app.setFont(QFont("Microsoft YaHei UI", 10))
+    app.setStyleSheet(STYLE)
+    return app
