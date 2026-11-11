@@ -62,6 +62,10 @@ class Proxy:
     password: str = field(default="", repr=False)
 
     @property
+    def is_local(self):
+        return local_host(self.host)
+
+    @property
     def url(self):
         host = f"[{self.host}]" if ":" in self.host else self.host
         auth = ""
@@ -78,6 +82,8 @@ class Check:
     code: int | None = None
     ms: int | None = None
     ip: str | None = field(default=None, repr=False)
+    country_code: str | None = None
+    kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -95,3 +101,16 @@ class Listener:
     address: str
     pid: int | None
     process: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class DiagnosticResult:
+    ports: tuple[int, ...]
+    listeners: dict[int, list[Listener]] | None
+    settings: tuple[str, ...]
+    sites: list[SiteResult]
+    direct_https: Check
+    direct_exit: Check
+    proxy_tunnel: Check | None
+    proxy_https: Check | None
+    proxy_exit: Check | None

@@ -58,6 +58,7 @@ def main():
     )]
     files += sorted((root / "netdoctor").glob("*.py"))
     files += sorted((root / "tests").glob("*.py"))
+    files += sorted((root / "tests" / "fixtures").glob("*.json"))
     with ZipFile(source, "w", ZIP_DEFLATED) as archive:
         for file in files:
             archive.write(file, f"{stem}/{file.relative_to(root).as_posix()}")

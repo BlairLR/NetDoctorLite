@@ -5,8 +5,8 @@ import unittest
 from unittest.mock import patch
 
 from netdoctor.local import listeners, local_proxy_addresses
-from netdoctor.model import Check, Listener, Proxy, SiteResult, custom_url
-from netdoctor.network import bounded, detect_proxy, diagnose, https, proxy_handshake
+from netdoctor.model import Check, DiagnosticResult, Listener, Proxy, SiteResult, custom_url
+from netdoctor.network import bounded, detect_proxy, diagnose, error_check, https, proxy_handshake
 from netdoctor.report import report, summary
 
 
@@ -62,6 +62,18 @@ class Tests(unittest.TestCase):
             self.assertIs(opened.get.call_args.kwargs["allow_redirects"], False)
             self.assertIs(opened.get.call_args.kwargs["verify"], True)
 
+    def test_cloudflare_location_matches_ip_and_ignores_data_center(self):
+        with patch("netdoctor.network.requests.Session") as session:
+            response = session.return_value.__enter__.return_value.get.return_value.__enter__.return_value
+            response.status_code = 200
+            response.raw.read.return_value = b"ip=8.8.8.8\nloc=US\ncolo=NRT\n"
+            check = https("https://example.com", trace=True)
+            self.assertEqual((check.ip, check.country_code), ("8.8.8.8", "US"))
+            response.raw.read.return_value = b"ip=8.8.8.8\nloc=XX\ncolo=NRT\n"
+            self.assertIsNone(https("https://example.com", trace=True).country_code)
+            response.raw.read.return_value = b"ip=127.0.0.1\nloc=JP\n"
+            self.assertIsNone(https("https://example.com", trace=True).country_code)
+
     def test_timeout(self):
         waiting = threading.Event()
         try:
@@ -109,8 +121,8 @@ class Tests(unittest.TestCase):
             request.assert_any_call(custom, proxy)
             self.assertEqual(sum(call.args[1:] == (proxy,) and not call.kwargs
                                  for call in request.call_args_list), 5)
-        self.assertIn(23456, result[0])
-        self.assertTrue(all(not site.https.ok and site.proxy_https.ok for site in result[3]))
+        self.assertIn(23456, result.ports)
+        self.assertTrue(all(not site.https.ok and site.proxy_https.ok for site in result.sites))
         exported = report(result, proxy)
         self.assertIn("代理 HTTPS：成功", exported)
         self.assertNotIn("secret=redact", exported)
@@ -144,12 +156,37 @@ class Tests(unittest.TestCase):
         failed = Check(False, "代理连接失败")
         ok = Check(True, "成功")
         ip = Check(True, "已取得出口公网 IP", ip="8.8.8.8")
-        result = ((19222,), {19222: []}, (), [], ok, ip, ok, failed, ip)
+        result = DiagnosticResult(
+            ports=(19222,), listeners={19222: []}, settings=(), sites=[],
+            direct_https=ok, direct_exit=ip, proxy_tunnel=ok, proxy_https=failed, proxy_exit=ip,
+        )
         self.assertIn("未监听", summary(result, local_proxy))
-        self.assertIn("握手成功，但访问外网测试失败", summary(result, local_proxy))
+        self.assertIn("代理隧道已建立，外网请求失败", summary(result, local_proxy))
         exported = report(result, local_proxy)
         for secret in ("verysecretuser", "verysecretpass", "8.8.8.8", "127.0.0.1"):
             self.assertNotIn(secret, exported)
+
+    def test_request_error_categories_do_not_echo_proxy_data(self):
+        from http.client import RemoteDisconnected
+        import requests
+        import socks
+        from urllib3 import exceptions
+
+        cases = (
+            (requests.exceptions.ProxyError(exceptions.ProxyError("proxy", OSError(
+                "Tunnel connection failed: 407 secret-proxy-name"))), "proxy_auth"),
+            (OSError("Tunnel connection failed: 502 secret-proxy-name"), "proxy_tunnel"),
+            (socks.GeneralProxyError("secret-proxy-name", socks.SOCKS5AuthError("auth")), "proxy_auth"),
+            (requests.exceptions.SSLError("secret-proxy-name"), "tls"),
+            (requests.exceptions.ReadTimeout("secret-proxy-name"), "timeout"),
+            (RemoteDisconnected("secret-proxy-name"), "http_request"),
+            (ConnectionRefusedError("secret-proxy-name"), "connection"),
+        )
+        for exc, kind in cases:
+            with self.subTest(kind=kind):
+                result = error_check(exc)
+                self.assertEqual(result.kind, kind)
+                self.assertNotIn("secret-proxy-name", result.detail)
 
 
 if __name__ == "__main__":

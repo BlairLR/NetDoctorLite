@@ -1,0 +1,128 @@
+{
+  "schema": 1,
+  "baseline_id": "legacy-v1-baseline",
+  "records": [
+    {
+      "id": "legacy-v1-baseline",
+      "time": "2026-11-11T09:00:00+08:00",
+      "vpn": "VPN 未连接",
+      "profile": {
+        "targets": "fea61b8869c2b78c51c322b1068cdc0e40b4292ce716103df1714ed47108e3c2",
+        "policy": "https-get-no-redirect-tls-verified-v1",
+        "mode": "manual",
+        "endpoint": "c5ffca3983587c8884af11dfc488c9cbc02a76a95c84ae9a6d60a3e993d95b1a",
+        "auth": false
+      },
+      "proxy": {
+        "protocol": "HTTP",
+        "port": 7890,
+        "is_local": true
+      },
+      "note": "",
+      "result": {
+        "ports": [
+          7890
+        ],
+        "listeners": {
+          "7890": [
+            {
+              "port": 7890,
+              "address": "127.0.0.1",
+              "pid": 100,
+              "process": "example.exe"
+            }
+          ]
+        },
+        "settings": [
+          "Windows 手动代理：未启用"
+        ],
+        "sites": [
+          {
+            "name": "GitHub",
+            "dns": {
+              "ok": true,
+              "detail": "解析成功",
+              "code": null,
+              "ms": null,
+              "ip": null,
+              "country_code": null,
+              "kind": null
+            },
+            "tcp": {
+              "ok": true,
+              "detail": "连接成功",
+              "code": null,
+              "ms": null,
+              "ip": null,
+              "country_code": null,
+              "kind": null
+            },
+            "https": {
+              "ok": true,
+              "detail": "服务器拒绝访问（HTTP 403）",
+              "code": 403,
+              "ms": 350,
+              "ip": null,
+              "country_code": null,
+              "kind": "http_forbidden"
+            },
+            "proxy_https": {
+              "ok": true,
+              "detail": "收到 HTTPS 响应",
+              "code": 200,
+              "ms": 220,
+              "ip": null,
+              "country_code": null,
+              "kind": null
+            }
+          }
+        ],
+        "direct": {
+          "ok": true,
+          "detail": "服务器拒绝访问（HTTP 403）",
+          "code": 403,
+          "ms": 350,
+          "ip": null,
+          "country_code": null,
+          "kind": "http_forbidden"
+        },
+        "direct_ip": {
+          "ok": true,
+          "detail": "已从 Cloudflare 取得出口公网 IP",
+          "code": null,
+          "ms": null,
+          "ip": "1.1.1.1",
+          "country_code": "AU",
+          "kind": null
+        },
+        "tunnel": {
+          "ok": true,
+          "detail": "代理已接受 CONNECT 隧道",
+          "code": null,
+          "ms": null,
+          "ip": null,
+          "country_code": null,
+          "kind": null
+        },
+        "via": {
+          "ok": true,
+          "detail": "收到 HTTPS 响应",
+          "code": 200,
+          "ms": 220,
+          "ip": null,
+          "country_code": null,
+          "kind": null
+        },
+        "via_ip": {
+          "ok": true,
+          "detail": "已从 Cloudflare 取得出口公网 IP",
+          "code": null,
+          "ms": null,
+          "ip": "8.8.8.8",
+          "country_code": "US",
+          "kind": null
+        }
+      }
+    }
+  ]
+}
