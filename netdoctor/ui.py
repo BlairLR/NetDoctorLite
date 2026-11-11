@@ -9,9 +9,10 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QVBoxLayout, QWidget, QAbstractItemView,
 )
 
-from .model import Proxy, custom_url, hostname
-from .network import diagnose
+from .model import COMMON_PORTS, Proxy, custom_url, hostname
+from .network import detect_proxy, diagnose
 from .report import comparison, describe, port_rows, report, route_rows, status, summary
+from .version import __version__
 
 STYLE = """
 QMainWindow, QScrollArea, QWidget#page {background:#f2f5fa;}
@@ -40,15 +41,21 @@ class Worker(QObject):
     done = Signal(object)
     failed = Signal()
 
-    def __init__(self, url, proxy):
+    def __init__(self, url, proxy, automatic):
         super().__init__()
         self.url = url
         self.proxy = proxy
+        self.automatic = automatic
 
     @Slot()
     def run(self):
         try:
-            self.done.emit(diagnose(self.url, self.proxy, self.progress.emit))
+            note = ""
+            if self.automatic:
+                self.progress.emit(2, "正在查找并验证本机代理")
+                self.proxy, note = detect_proxy()
+            result = diagnose(self.url, self.proxy, self.progress.emit)
+            self.done.emit((result, self.proxy, note))
         except Exception:
             self.failed.emit()
         finally:
@@ -91,15 +98,21 @@ def fill(widget, rows):
                           sum(widget.rowHeight(i) for i in range(len(rows))))
 
 
+def website_https(check):
+    if check is None:
+        return "未检测"
+    result = f"HTTP {check.code}" if check.code is not None else check.detail
+    return f"{result} · {check.ms} 毫秒" if check.ms is not None else result
+
+
 class Window(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("NetDoctor Lite · 网络诊断")
+        self.setWindowTitle(f"NetDoctor Lite v{__version__} · 网络诊断")
         self.resize(1000, 860)
         self.setMinimumSize(760, 550)
         self._thread = None
         self._worker = None
-        self._proxy = None
         self._report = ""
         shell = QWidget()
         shell.setObjectName("page")
@@ -126,8 +139,17 @@ class Window(QMainWindow):
         self.url.setMaxLength(2048)
         self.url.setEchoMode(QLineEdit.EchoMode.PasswordEchoOnEdit)
         form.addRow("自定义网站", self.url)
-        self.enabled = QCheckBox("测试指定代理")
+        self.enabled = QCheckBox("对比直连与代理")
         form.addRow("", self.enabled)
+        self.proxy_options = QWidget()
+        options = QVBoxLayout(self.proxy_options)
+        options.setContentsMargins(0, 0, 0, 0)
+        self.proxy_mode = QComboBox()
+        self.proxy_mode.addItem("自动检测本机代理（推荐）", "auto")
+        for port in COMMON_PORTS:
+            self.proxy_mode.addItem(f"常用本机端口 · {port}", port)
+        self.proxy_mode.addItem("手动填写代理", "manual")
+        options.addWidget(self.proxy_mode)
         self.proxy_fields = QWidget()
         row = QHBoxLayout(self.proxy_fields)
         row.setContentsMargins(0, 0, 0, 0)
@@ -149,19 +171,27 @@ class Window(QMainWindow):
             field.setMaxLength(255)
         for widget in (self.proto, self.host, self.port, self.username, self.password):
             row.addWidget(widget)
-        self.proxy_fields.hide()
-        self.enabled.toggled.connect(self.proxy_fields.setVisible)
-        form.addRow("协议 / 主机 / 端口", self.proxy_fields)
+        options.addWidget(self.proxy_fields)
+        self.proxy_options.hide()
+        self.enabled.toggled.connect(self.proxy_options.setVisible)
+        self.proxy_mode.currentIndexChanged.connect(self.change_proxy_mode)
+        self.change_proxy_mode()
+        form.addRow("代理设置", self.proxy_options)
         settings.addLayout(form)
+        settings.addWidget(label("自动模式每次重新查找本机代理。需要认证或自定义地址时，可手动填写。", "muted", True))
         settings.addWidget(label("直连忽略系统与环境代理；出口通过 Cloudflare 查询，必要时改用 api.ipify.org。"
                                  "代理凭据仅在本次测试中使用。", "muted", True))
         result = self.card("诊断结论")
         self.conclusion = label("点击「开始检测」查看诊断结果。", "conclusion", True)
         result.addWidget(self.conclusion)
-        section = self.card("网站连接 · 直连")
-        self.sites = table(("目标", "DNS", "TCP 443", "HTTPS", "HTTP", "耗时", "说明"))
+        section = self.card("网站连接 · 直连与代理")
+        self.sites = table(("目标", "直连 DNS", "直连 TCP 443", "直连 HTTPS", "代理 HTTPS"))
+        header = self.sites.horizontalHeader()
+        for column in (3, 4):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Stretch)
         section.addWidget(self.sites)
-        section.addWidget(label("HTTPS 成功表示收到经 TLS 验证的响应；HTTP 4xx / 5xx 仍可能无法使用网站。", "muted", True))
+        section.addWidget(label("两条通路分别测试 HTTPS。DNS 和 TCP 443 仅指直连。"
+                                 "HTTP 4xx / 5xx 表示网站有响应，但访问可能受限。", "muted", True))
         section = self.card("本机代理端口及设置")
         self.ports = table(("端口", "TCP", "监听地址", "PID", "进程"))
         section.addWidget(self.ports)
@@ -205,6 +235,13 @@ class Window(QMainWindow):
         self.body.addWidget(frame)
         return layout
 
+    def change_proxy_mode(self):
+        mode = self.proxy_mode.currentData()
+        self.proxy_fields.setVisible(mode != "auto")
+        if isinstance(mode, int):
+            self.host.setText("127.0.0.1")
+            self.port.setValue(mode)
+
     @Slot()
     def begin(self):
         if self._thread is not None:
@@ -216,7 +253,8 @@ class Window(QMainWindow):
             QMessageBox.warning(self, "网址无效", "请输入有效的 HTTPS 网址，不要在网址中填写用户名或密码。")
             return
         proxy = None
-        if self.enabled.isChecked():
+        automatic = self.enabled.isChecked() and self.proxy_mode.currentData() == "auto"
+        if self.enabled.isChecked() and not automatic:
             try:
                 host = hostname(self.host.text().strip().removeprefix("[").removesuffix("]"))
                 user, password = self.username.text(), self.password.text()
@@ -235,8 +273,9 @@ class Window(QMainWindow):
                 return
         self.username.clear()
         self.password.clear()
-        self._proxy = proxy
         self._report = ""
+        self.enabled.setEnabled(False)
+        self.proxy_options.setEnabled(False)
         for widget in (self.start, self.copy, self.export):
             widget.setEnabled(False)
         for widget in (self.sites, self.ports, self.routes):
@@ -246,7 +285,7 @@ class Window(QMainWindow):
         self.conclusion.setText("正在检测，请稍候。")
         self.set_progress(0, "正在启动检测")
         self._thread = QThread(self)
-        self._worker = Worker(url, proxy)
+        self._worker = Worker(url, proxy, automatic)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(self.set_progress)
@@ -264,30 +303,33 @@ class Window(QMainWindow):
         self.activity.setText(text)
 
     @Slot(object)
-    def show_result(self, result):
+    def show_result(self, payload):
+        result, proxy, note = payload
         ports, local, config, sites, *_ = result
-        self.conclusion.setText(summary(result, self._proxy))
+        self.conclusion.setText(summary(result, proxy, note))
+        if note and proxy:
+            self.proto.setCurrentText(proxy.protocol)
+            self.host.setText(proxy.host)
+            self.port.setValue(proxy.port)
         fill(self.sites, (
             (s.name, status(s.dns), status(s.tcp) if s.dns.ok else "未检测",
-             status(s.https), str(s.https.code or "—"),
-             f"{s.https.ms} 毫秒" if s.https.ms is not None else "—",
-             "；".join([s.dns.detail] if not s.dns.ok else
-                        [s.tcp.detail] if not s.tcp.ok else []) +
-             ("；" if not (s.dns.ok and s.tcp.ok) else "") + s.https.detail)
+             website_https(s.https), website_https(s.proxy_https))
             for s in sites
         ))
+        for row, site in enumerate(sites):
+            for column, check in enumerate((site.dns, site.tcp, site.https, site.proxy_https), 1):
+                if check is not None:
+                    self.sites.item(row, column).setToolTip(describe(check))
         fill(self.ports, port_rows(ports, local))
         self.config.setText("\n".join(config))
         fill(self.routes, ((name, describe(check, show_ip=True)) for name, check in route_rows(result)))
-        self.compare.setText(comparison(result))
-        self._report = report(result, self._proxy)
-        self._proxy = None
+        self.compare.setText(note if note and proxy is None else comparison(result))
+        self._report = report(result, proxy, note)
         self.copy.setEnabled(True)
         self.export.setEnabled(True)
 
     @Slot()
     def show_failure(self):
-        self._proxy = None
         self.conclusion.setText("检测未能完成，请重新开始。")
         self.config.setText("未取得结果")
         self.compare.setText("未取得结果")
@@ -298,6 +340,8 @@ class Window(QMainWindow):
         self._thread.deleteLater()
         self._thread = self._worker = None
         self.start.setEnabled(True)
+        self.enabled.setEnabled(True)
+        self.proxy_options.setEnabled(True)
 
     @Slot()
     def copy_result(self):

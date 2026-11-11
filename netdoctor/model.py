@@ -4,6 +4,17 @@ import re
 from urllib.parse import quote, urlsplit
 
 COMMON_PORTS = (7890, 7891, 1080, 10808, 10809, 12450)
+
+
+def local_host(host):
+    if host == "localhost":
+        return True
+    try:
+        return ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 SITES = (
     ("GitHub", "https://github.com/"),
     ("Google", "https://www.google.com/"),
@@ -75,6 +86,7 @@ class SiteResult:
     dns: Check
     tcp: Check
     https: Check
+    proxy_https: Check | None = None
 
 
 @dataclass(frozen=True)

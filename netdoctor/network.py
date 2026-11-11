@@ -1,6 +1,7 @@
 """Network probes. Every request explicitly chooses its route."""
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import replace
 from http.client import HTTPConnection, HTTPException
 from ipaddress import ip_address
 from queue import Empty, Queue
@@ -13,8 +14,8 @@ from urllib.parse import urlsplit
 import requests
 import socks
 
-from .local import configuration, listeners
-from .model import COMMON_PORTS, IP_URL, ROUTE_URL, SITES, Check, SiteResult
+from .local import configuration, listeners, windows_proxy
+from .model import COMMON_PORTS, IP_URL, ROUTE_URL, SITES, Check, Proxy, SiteResult, local_host
 
 # System DNS and a slow trickle of bytes can outlast ordinary socket timeouts.
 # Bound the caller's wait and cap the number of unfinished background probes.
@@ -181,10 +182,41 @@ def proxy_handshake(proxy, url=ROUTE_URL):
         return Check(False, "代理响应无效或目标隧道被拒绝")
 
 
+def detect_proxy():
+    configured = bounded(lambda: windows_proxy(include_local_ports=True), 2, ())
+    ports = tuple(dict.fromkeys([port for _, port in configured] + list(COMMON_PORTS)))
+    local = bounded(lambda: listeners(ports, include_proxy_processes=True), 3, None)
+    if local is None:
+        return None, "自动检测无法读取本机监听列表，请手动填写代理。"
+
+    wildcard = {"0.0.0.0": "127.0.0.1", "::": "::1"}
+    available = []
+    for port, rows in local.items():
+        for row in rows:
+            host = wildcard.get(row.address, row.address)
+            if local_host(host):
+                available.append((host, port))
+    endpoints = [address for address in configured if address in available]
+    endpoints.extend(available)
+    endpoints = list(dict.fromkeys(endpoints))[:8]
+    if not endpoints:
+        return None, "未发现候选本机代理端口，可手动填写代理。"
+
+    candidates = [Proxy(protocol, host, port) for host, port in endpoints
+                  for protocol in ("HTTP", "SOCKS5")]
+    with ThreadPoolExecutor(max_workers=len(candidates)) as pool:
+        checks = pool.map(lambda candidate: request_check(ROUTE_URL, candidate, require_2xx=True),
+                          candidates)
+        for candidate, check in zip(candidates, checks):
+            if check.ok:
+                return candidate, f"自动检测已选用 {candidate.protocol} · 本机端口 {candidate.port}。"
+    return None, "候选端口有监听，但未验证到可访问外网的代理。请检查节点或手动填写认证。"
+
+
 def diagnose(custom, proxy, progress):
     targets = SITES + ((("自定义网站", custom),) if custom else ())
     ports = tuple(sorted(set(COMMON_PORTS) | ({proxy.port} if proxy and
-                         proxy.host in ("localhost", "127.0.0.1", "::1") else set())))
+                         local_host(proxy.host) else set())))
     progress(5, "正在读取本机监听和代理设置")
     local = bounded(lambda: listeners(ports), 3, None)
     config = bounded(configuration, 3, ("代理设置读取超时或不可用",))
@@ -194,15 +226,22 @@ def diagnose(custom, proxy, progress):
         pending = {pool.submit(probe_site, *target): i for i, target in enumerate(targets)}
         for count, future in enumerate(as_completed(pending), 1):
             sites[pending[future]] = future.result()
-            progress(15 + int(40 * count / len(targets)), f"网站检测 {count}/{len(targets)}")
-    progress(60, "正在检测直连通路及出口")
+            progress(15 + int(20 * count / len(targets)), f"网站直连 {count}/{len(targets)}")
+    progress(40, "正在检测直连通路及出口")
     direct = request_check(ROUTE_URL, require_2xx=True, trace=True)
     direct_ip = (Check(True, "已从 Cloudflare 取得出口公网 IP", ip=direct.ip)
                  if direct.ip else request_check(IP_URL, read_ip=True))
     tunnel = via = via_ip = None
     if proxy:
-        progress(75, "正在验证代理协议握手")
+        progress(55, "正在验证代理协议握手")
         tunnel = bounded(lambda: proxy_handshake(proxy), 6, Check(False, "握手超时或无法完成"))
+        with ThreadPoolExecutor(max_workers=len(targets)) as pool:
+            pending = {pool.submit(request_check, url, proxy): i
+                       for i, (_, url) in enumerate(targets)}
+            for count, future in enumerate(as_completed(pending), 1):
+                i = pending[future]
+                sites[i] = replace(sites[i], proxy_https=future.result())
+                progress(55 + int(25 * count / len(targets)), f"网站代理 {count}/{len(targets)}")
         progress(85, "正在通过指定代理访问外网及查询出口")
         via = request_check(ROUTE_URL, proxy, require_2xx=True, trace=True)
         via_ip = (Check(True, "已从 Cloudflare 取得出口公网 IP", ip=via.ip)

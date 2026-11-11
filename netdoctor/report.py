@@ -3,6 +3,9 @@
 from datetime import datetime
 from ipaddress import ip_address
 
+from .model import local_host
+from .version import __version__
+
 
 def status(check):
     return "成功" if check.ok else "失败"
@@ -31,9 +34,9 @@ def port_rows(ports, local):
                        str(row.pid) if row.pid is not None else "未知", row.process)
 
 
-def summary(result, proxy):
+def summary(result, proxy, selection_note=""):
     _, local, _, sites, direct, _, tunnel, via, _ = result
-    notes = []
+    notes = [selection_note] if selection_note else []
     if direct.ok and via and via.ok:
         notes.append("直连和指定代理均可访问测试目标。")
     elif via and via.ok:
@@ -45,8 +48,11 @@ def summary(result, proxy):
     failed = [s.name for s in sites if not s.dns.ok]
     if failed:
         notes.append("DNS 解析失败或超时：" + "、".join(failed) + "。")
+    proxy_only = [s.name for s in sites if not s.https.ok and s.proxy_https and s.proxy_https.ok]
+    if proxy_only:
+        notes.append("直连未收到 HTTPS 响应，代理收到响应：" + "、".join(proxy_only) + "。")
     if proxy and via and not via.ok:
-        is_local = proxy.host in ("localhost", "127.0.0.1", "::1")
+        is_local = local_host(proxy.host)
         if is_local and local is not None:
             if not local.get(proxy.port):
                 notes.append("所选本地代理端口未监听，可能尚未启动。")
@@ -79,13 +85,15 @@ def comparison(result):
     return "两条通路出口 IP 不同"
 
 
-def report(result, proxy):
+def report(result, proxy, selection_note=""):
     ports, local, config, sites, *_ = result
-    lines = ["NetDoctor Lite 网络诊断报告", datetime.now().astimezone().isoformat(timespec="seconds"),
-             "", summary(result, proxy), "", "【网站直连】"]
+    lines = [f"NetDoctor Lite v{__version__} 网络诊断报告", datetime.now().astimezone().isoformat(timespec="seconds"),
+             "", summary(result, proxy, selection_note), "", "【网站连接对比】"]
     for site in sites:
-        lines += [site.name, f"  DNS：{describe(site.dns)}",
-                  f"  TCP 443：{describe(site.tcp)}", f"  HTTPS：{describe(site.https)}"]
+        proxy_status = describe(site.proxy_https) if site.proxy_https else "未检测"
+        lines += [site.name, f"  直连 DNS：{describe(site.dns)}",
+                  f"  直连 TCP 443：{describe(site.tcp)}",
+                  f"  直连 HTTPS：{describe(site.https)}", f"  代理 HTTPS：{proxy_status}"]
     lines += ["", "【本机端口】", "端口 / 监听状态 / 地址 / PID / 进程"]
     for port, state, address, pid, process in port_rows(ports, local):
         if address != "—":

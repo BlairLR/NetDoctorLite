@@ -4,9 +4,9 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from netdoctor.local import listeners
-from netdoctor.model import Check, Proxy, custom_url
-from netdoctor.network import bounded, https, proxy_handshake
+from netdoctor.local import listeners, local_proxy_addresses
+from netdoctor.model import Check, Listener, Proxy, SiteResult, custom_url
+from netdoctor.network import bounded, detect_proxy, diagnose, https, proxy_handshake
 from netdoctor.report import report, summary
 
 
@@ -68,6 +68,52 @@ class Tests(unittest.TestCase):
             self.assertEqual(bounded(waiting.wait, 0.03, "timeout"), "timeout")
         finally:
             waiting.set()
+
+    def test_auto_proxy_rediscovers_port_and_skips_listener_without_working_https(self):
+        self.assertEqual(
+            local_proxy_addresses("http=127.0.0.1:34567;https=[::1]:45678;"
+                                  "socks5://user:password@127.0.0.1:50000;proxy.example:80"),
+            (("127.0.0.1", 34567), ("::1", 45678)),
+        )
+        old = Listener(7890, "127.0.0.1", 1, "test.exe")
+        new = Listener(34567, "0.0.0.0", 2, "test.exe")
+        with (
+            patch("netdoctor.network.windows_proxy", side_effect=[(), (("127.0.0.1", 34567),), ()]),
+            patch("netdoctor.network.listeners",
+                  side_effect=[{7890: [old]}, {7890: [old], 34567: [new]}, {7890: [old]}]),
+            patch("netdoctor.network.request_check") as request,
+        ):
+            request.side_effect = lambda url, proxy, **kw: Check(proxy.port == 7890, "result")
+            self.assertEqual(detect_proxy()[0].port, 7890)
+            request.side_effect = lambda url, proxy, **kw: Check(
+                proxy.port == 34567 and proxy.protocol == "SOCKS5", "result")
+            picked, note = detect_proxy()
+            self.assertEqual((picked.port, picked.protocol), (34567, "SOCKS5"))
+            self.assertIn("34567", note)
+            self.assertIsNone(detect_proxy()[0])
+
+    def test_each_website_uses_the_selected_proxy_and_keeps_direct_result(self):
+        proxy = Proxy("SOCKS5", "127.0.0.1", 23456)
+        custom = "https://example.com/private?secret=redact"
+        failed = Check(False, "连接超时")
+        ok = Check(True, "收到 HTTPS 响应", code=200, ip="1.1.1.1")
+        with (
+            patch("netdoctor.network.configuration", return_value=()),
+            patch("netdoctor.network.listeners", side_effect=lambda ports: {p: [] for p in ports}),
+            patch("netdoctor.network.proxy_handshake", return_value=ok),
+            patch("netdoctor.network.probe_site",
+                  side_effect=lambda name, _: SiteResult(name, ok, failed, failed)),
+            patch("netdoctor.network.request_check", return_value=ok) as request,
+        ):
+            result = diagnose(custom, proxy, lambda *_: None)
+            request.assert_any_call(custom, proxy)
+            self.assertEqual(sum(call.args[1:] == (proxy,) and not call.kwargs
+                                 for call in request.call_args_list), 5)
+        self.assertIn(23456, result[0])
+        self.assertTrue(all(not site.https.ok and site.proxy_https.ok for site in result[3]))
+        exported = report(result, proxy)
+        self.assertIn("代理 HTTPS：成功", exported)
+        self.assertNotIn("secret=redact", exported)
 
     def test_loopback_listening_and_handshakes(self):
         for mode in ("closed", "http", "socks"):
