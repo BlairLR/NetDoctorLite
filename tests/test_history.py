@@ -65,7 +65,10 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(baseline.result.proxy_exit.country_code, "US")
         self.assertEqual(json.loads(json.dumps(encode_snapshot(baseline))), original["records"][0])
         fresh = snapshot(mode="manual", proxy=Proxy("HTTP", "127.0.0.1", 7890))
-        changes = {row.metric: row.verdict for row in compare_runs(baseline, fresh)}
+        with self.assertRaisesRegex(IncompatibleRuns, "检测目标"):
+            compare_runs(baseline, fresh)
+        matching_legacy = replace(fresh, profile=baseline.profile)
+        changes = {row.metric: row.verdict for row in compare_runs(baseline, matching_legacy)}
         self.assertEqual(changes["GitHub · 直连 HTTPS · HTTP"], "改善")
 
     def test_auto_baseline_preflight_checks_endpoint_after_discovery(self):

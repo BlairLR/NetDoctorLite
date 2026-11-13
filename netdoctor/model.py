@@ -18,7 +18,7 @@ def local_host(host):
 SITES = (
     ("GitHub", "https://github.com/"),
     ("Google", "https://www.google.com/"),
-    ("OpenAI", "https://openai.com/"),
+    ("ChatGPT", "https://chatgpt.com/"),
     ("Cloudflare", "https://www.cloudflare.com/"),
 )
 ROUTE_URL = "https://www.cloudflare.com/cdn-cgi/trace"

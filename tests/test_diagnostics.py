@@ -119,11 +119,13 @@ class Tests(unittest.TestCase):
         ):
             result = diagnose(custom, proxy, lambda *_: None)
             request.assert_any_call(custom, proxy)
+            request.assert_any_call("https://chatgpt.com/", proxy)
             self.assertEqual(sum(call.args[1:] == (proxy,) and not call.kwargs
                                  for call in request.call_args_list), 5)
         self.assertIn(23456, result.ports)
         self.assertTrue(all(not site.https.ok and site.proxy_https.ok for site in result.sites))
         exported = report(result, proxy)
+        self.assertIn("\nChatGPT\n", exported)
         self.assertIn("代理 HTTPS：成功", exported)
         self.assertNotIn("secret=redact", exported)
 
